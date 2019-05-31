@@ -72,6 +72,7 @@ class TestSamPython36HelloWorldIntegration(InvokeIntegBase):
     @parameterized.expand([
         ("TimeoutFunction"),
         ("TimeoutFunctionWithParameter"),
+        ("TimeoutFunctionWithStringParameter"),
     ])
     def test_invoke_with_timeout_set(self, function_name):
         command_list = self.get_command_list(function_name,
