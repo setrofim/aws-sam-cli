@@ -4,10 +4,46 @@ Wrapper to Docker Attach API
 
 import struct
 import logging
+import six
 from socket import timeout
-from docker.utils.socket import read, read_exactly, SocketError
+from docker.utils.socket import read as _read, SocketError
 
 LOG = logging.getLogger(__name__)
+
+
+# Re-implementing read() and read_exactly from  docker.utils.socket to take
+# into account the fact io.BufferedReader wrapping the socket may still have
+# contents in its buffer after header have been parsed by HTTPResponse. These
+# rely on the buffer having been propagated to the socket inside _buffer
+# attribute by _get_socket() -- see further down.
+
+def read(socket, remaining):
+    if not socket._buffer:
+        return _read(socket, remaining)
+
+    ret, socket._buffer = socket._buffer[:remaining], socket._buffer[remaining:]
+
+    to_read = remaining - len(ret)
+    if to_read:
+        return ret.tobytes() + _read(socket, to_read)
+    else:
+        return ret.tobytes()
+
+
+# This is identical to the implementation inside docker.utils.socket, with the
+# exception that it is using the buffer-aware read() above.
+def read_exactly(socket, n):
+    """
+    Reads exactly n bytes from socket
+    Raises SocketError if there isn't enough data
+    """
+    data = six.binary_type()
+    while len(data) < n:
+        next_data = read(socket, n - len(data))
+        if not next_data:
+            raise SocketError("Unexpected EOF")
+        data += next_data
+    return data
 
 
 def attach(docker_client, container, stdout=True, stderr=True, logs=False):
@@ -58,9 +94,20 @@ def attach(docker_client, container, stdout=True, stderr=True, logs=False):
 
     # Send out the attach request and read the socket for response
     response = api_client._post(url, headers=headers, params=query_params, stream=True)  # pylint: disable=W0212
-    socket = api_client._get_raw_response_socket(response)  # pylint: disable=W0212
+    socket = _get_socket(api_client, response)  # pylint: disable=W0212
 
     return _read_socket(socket)
+
+
+def _get_socket(api_client, response):
+    """
+    Return the raw socket from the response, attaching the buffer from the
+    io.BufferedReader wrapping it.
+
+    """
+    socket = api_client._get_raw_response_socket(response)  # pylint: disable=W0212
+    setattr(socket, '_buffer', memoryview(response.raw._fp.fp.peek()))
+    return socket
 
 
 def _read_socket(socket):
